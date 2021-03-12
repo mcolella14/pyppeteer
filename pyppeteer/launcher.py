@@ -56,17 +56,14 @@ class BrowserRunner:
         if kwargs.get('env'):
             process_opts['env'] = kwargs['env']
 
+        has_debugger_port_or_pipe = any(x.startswith('--remote-debugging') for x in self.process_args)
         if not kwargs.get('dumpio'):
-            # we read stdout to check it for the ws endpoint
-            process_opts['stdout'] = subprocess.PIPE
+            # We can parse the browser URL from the remote-debugging-port that we get from get_free_port(), and use that to get the ws endpoint.
+            # If we somehow don't have this. we need to pipe stdout to parse the ws endpoint.
+            process_opts['stdout'] = subprocess.DEVNULL if has_debugger_port_or_pipe else subprocess.PIPE
             process_opts['stderr'] = subprocess.STDOUT
-        else:
-            # todo: dumpio. See: https://pptr.dev/#?product=Puppeteer&version=v2.1.1&show=api-puppeteerlaunchoptions
-            # we need to tee proc stdout to both PIPE (so we can read it) and stdout (so users can see dumped IO)
-            # see these SO threads:
-            # https://stackoverflow.com/q/2996887/
-            # https://stackoverflow.com/q/17190221/
-            raise NotImplementedError(f'dumpio argument currently  not implemented')
+        elif not has_debugger_port_or_pipe:
+            raise NotImplementedError('Cannot use dumpio without access to remote-dubbing-port/pipe')
 
         assert self.proc is None, 'This process has previously been started'
 
@@ -162,7 +159,12 @@ class BrowserRunner:
             # self.connection = Connection('', transport, delay=slowMo)
         if self.proc is None:
             raise RuntimeError('class process not initialized (self.proc = None)')
-        browser_ws_endpoint = waitForWSEndpoint(self.proc, timeout, preferredRevision)
+        debugging_port = [arg.split('=')[1].strip() for arg in self.proc.args if '--remote-debugging-port=' in arg]
+        if debugging_port:
+            browser_ws_endpoint = getWSEndpoint(f'http://localhost:{debugging_port[0]}')
+        else:
+            # Shouldn't reach this, but who knows ¯\_(ツ)_/¯
+            browser_ws_endpoint = waitForWSEndpoint(self.proc, timeout, preferredRevision) 
         transport = await WebsocketTransport.create(uri=browser_ws_endpoint)
         self.connection = Connection(url=browser_ws_endpoint, transport=transport, delay=slowMo)
         return self.connection
@@ -348,7 +350,6 @@ class ChromeLauncher(BaseBrowserLauncher):
 
 class FirefoxLauncher(BaseBrowserLauncher):
     DEFAULT_ARGS = [
-        '--remote-debugging-port=0',
         '--no-remote',
         '--foreground',
     ]
@@ -543,6 +544,8 @@ class FirefoxLauncher(BaseBrowserLauncher):
         else:
             firefox_args.extend(args)
 
+        if not any(x.startswith('--remote-debugging-') for x in firefox_args):
+            firefox_args.append(f'--remote-debugging-port={get_free_port()}')
         if '-profile' not in firefox_args and '--profile' not in firefox_args:
             profile_path = tempfile.TemporaryDirectory('pyppyeteer2_firefox_profile_')
             firefox_args.extend(('--profile', profile_path.name))
